@@ -1,0 +1,52 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: eventify
+      POSTGRES_PASSWORD: eventify
+      POSTGRES_DB: eventify
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  mailhog:
+    image: mailhog/mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  server:
+    build: ./server
+    environment:
+      DATABASE_URL: postgres://eventify:eventify@postgres:5432/eventify
+      REDIS_URL: redis://redis:6379
+      STRIPE_SECRET_KEY: sk_test_XXXXXXXXXXXXXXXX
+      STRIPE_WEBHOOK_SECRET: whsec_XXXXXXXXXXXXXXXX
+      NODE_ENV: development
+      MAIL_HOST: mailhog
+      MAIL_PORT: 1025
+      MAIL_FROM: no-reply@eventify.local
+    ports:
+      - "4000:4000"
+    depends_on:
+      - postgres
+      - redis
+      - mailhog
+
+  client:
+    build: ./client
+    ports:
+      - "5173:5173"
+    depends_on:
+      - server
+
+volumes:
+  pgdata:
+
