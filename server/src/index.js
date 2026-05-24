@@ -156,4 +156,4 @@ app.get('/admin/export/attendees.csv', async (req, res) => {
   res.end();
 });
 
-server.listen(4000, () => console.log('Server listening on 4000'));
+const PORT = process.env.PORT || 4000; server.listen(PORT, '0.0.0.0', () => console.log(`Server listening on ${PORT}`));
