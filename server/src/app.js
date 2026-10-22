@@ -21,7 +21,7 @@ function createApp({ config, services, auth, pool, redis }) {
       contentSecurityPolicy: {
         directives: {
           'connect-src': ["'self'", config.appUrl.replace(/^http/, 'ws')],
-          'img-src': ["'self'", 'data:'],
+          'img-src': ["'self'", 'data:', 'https://image.tmdb.org'],
           'upgrade-insecure-requests': config.env === 'production' ? [] : null,
         },
       },
@@ -93,6 +93,27 @@ function createApp({ config, services, auth, pool, redis }) {
 
   app.post('/api/session', (req, res) => {
     res.status(201).json({ token: auth.issue().token });
+  });
+
+  const { catalog } = services;
+  const slug = (value, name) => {
+    if (typeof value !== 'string' || !/^[a-z0-9-]{1,60}$/.test(value)) {
+      throw new AppError(400, 'invalid_input', `${name} is not valid.`);
+    }
+    return value;
+  };
+
+  app.get('/api/cities', async (req, res) => {
+    res.json({ cities: await catalog.listCities() });
+  });
+
+  app.get('/api/cities/:city/movies', async (req, res) => {
+    res.json(await catalog.moviesInCity(slug(req.params.city, 'city')));
+  });
+
+  app.get('/api/cities/:city/movies/:movieId/shows', async (req, res) => {
+    const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : null;
+    res.json(await catalog.showtimes(slug(req.params.city, 'city'), slug(req.params.movieId, 'movieId'), date));
   });
 
   app.get('/api/events', async (req, res) => {

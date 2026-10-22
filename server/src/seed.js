@@ -58,6 +58,13 @@ async function resetEvent(pool, eventId) {
   await withTransaction(pool, async (client) => {
     await client.query('DELETE FROM waitlist WHERE event_id = $1', [eventId]);
     await client.query('DELETE FROM bookings WHERE event_id = $1', [eventId]);
+    const { rows } = await client.query('SELECT movie_id FROM events WHERE id = $1', [eventId]);
+    if (rows[0]?.movie_id) {
+      // Movie shows rebuild their seats (and pre-sold seats) on next open.
+      await client.query('DELETE FROM seats WHERE event_id = $1', [eventId]);
+      await client.query('UPDATE events SET seats_ready = false WHERE id = $1', [eventId]);
+      return;
+    }
     await client.query(`UPDATE seats SET status = 'available' WHERE event_id = $1`, [eventId]);
     await markPresold(client, eventId);
   });

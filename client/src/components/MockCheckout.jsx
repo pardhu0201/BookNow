@@ -22,7 +22,8 @@ export default function MockCheckout({ bookingId }) {
     return () => clearInterval(t);
   }, []);
 
-  const back = (payment) => window.location.assign(`/?payment=${payment}&booking=${bookingId}`);
+  const back = (payment) =>
+    window.location.assign(`/shows/${booking?.eventId ?? ''}?payment=${payment}&booking=${bookingId}`);
 
   const pay = async () => {
     setBusy(true);

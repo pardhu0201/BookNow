@@ -1,15 +1,19 @@
 # BookNow
 
-Live event seat booking where two people can never buy the same seat. Seats are held with Redis locks, sold inside PostgreSQL transactions, and every change is pushed to every open browser over Socket.IO.
+Movie ticket booking where two people can never buy the same seat. Pick a city, a film and a showtime, then choose seats on a live seat map. Seats are held with Redis locks, sold inside PostgreSQL transactions, and every change is pushed to every open browser over Socket.IO.
 
 **[Live demo: booknow-a4ut.onrender.com](https://booknow-a4ut.onrender.com)** · [![CI](https://github.com/pardhu0201/BookNow/actions/workflows/ci.yml/badge.svg)](https://github.com/pardhu0201/BookNow/actions/workflows/ci.yml)
 
-![BookNow seat map: your hold in blue, other people's holds striped amber, sold seats grey](docs/screenshot.jpg)
+| Movies in your city | Showtimes by theatre | Live seat map |
+| --- | --- | --- |
+| ![Movies now showing in Hyderabad, with TMDB posters](docs/movies.jpg) | ![Ranabaali showtimes at AMB Cinemas, Allu Cinemas and Prasads Multiplex with availability](docs/showtimes.jpg) | ![Seat map for a 10:15 pm show at Prasads Multiplex](docs/seats.jpg) |
 
-> Open the demo in two browser windows and hold a seat in one: it locks in the other instantly. The free server sleeps when idle, so the first load can take about a minute.
+> Open a show in two browser windows and hold a seat in one: it locks in the other instantly. The free server sleeps when idle, so the first load can take about a minute.
 
 ## What it does
 
+- **Browse like a real ticketing app:** choose a city (Hyderabad, Bengaluru, Chennai, Mumbai, Delhi-NCR), see the films showing there, pick a date and a showtime at a real cinema (AMB Cinemas, Prasads Multiplex, PVR Sathyam, PVR ICON, Maratha Mandir and more). Each showtime shows live availability: Available, Filling fast, Almost full, Sold out.
+- **Real films:** the October 2026 releases in Indian cinemas, with posters, runtime, genres, cast and ratings from [TMDB](https://www.themoviedb.org). Films not yet released show as advance booking.
 - **Hold a seat** for 10 minutes. Everyone else sees it lock in real time and cannot take it while you pay.
 - **Pay** through Stripe Checkout (test mode), or a built-in test checkout when no Stripe keys are configured, so the demo works with no payment account.
 - **Release** a seat, or let the hold run out: it goes **first to the waitlist** (held 5 minutes for the next person, who is notified in the app and by email), and only then back on the map.
@@ -54,11 +58,22 @@ sequenceDiagram
 
 | Check | Result |
 | --- | --- |
-| Automated tests against real PostgreSQL and Redis | 35 passing in CI |
+| Automated tests against real PostgreSQL and Redis | 45 passing in CI |
+| 20 visitors open a brand-new show at the same instant | its 96 seats are created exactly once |
 | 100 visitors hold the same seat at the same instant | exactly 1 succeeds, 99 get 409 |
 | 120 concurrent buyers simulate a rush (hold, pay, release, let holds lapse) | 0 seats sold twice; sold seats = confirmed bookings |
 | k6 load test: 120 virtual users on 50 seats ([CI run](https://github.com/pardhu0201/BookNow/actions/runs/39770788969)) | 821 requests, 0 errors; hold latency 19 ms median, 112 ms p95; hall sold out (50/50) with 0 seats sold twice and 542 contested holds correctly refused |
 | Stripe webhook replayed 3 times at once | 1 sale |
+
+## The catalogue
+
+Cities, theatres, films and shows live in PostgreSQL (`migrations/002_catalog.sql`). Every show is its own seat inventory, so all the locking above applies per show.
+
+- **Showtimes roll forward:** on boot and every hour, the server generates the next 3 days of shows (each city's headline films in every theatre, plus a rotating pick of the rest). A unique index on `(theatre, screen, start time)` makes this idempotent.
+- **Seats are created on first use:** 15 theatres x 3 days is hundreds of shows, so a show's 96 seats (and its pre-sold seats) are created only when someone first opens it. A row lock on the show makes concurrent first visits safe.
+- **Prices** come from the seat tier (Classic, Prime, Recliner) times each theatre's price level.
+- **No booking after start:** holds on a show that has started are refused.
+- **Data sources:** film details and posters from TMDB, linked from TMDB's image CDN with attribution; cinema names from public listings. Showtimes and prices are simulated. This is a portfolio demo, not affiliated with any cinema, studio or ticketing company, and it sells no real tickets.
 
 ## Bugs fixed from the first version
 
@@ -101,8 +116,10 @@ flowchart LR
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/session` | Issue a guest session token |
-| `GET` | `/api/events` | List events with seats left |
-| `GET` | `/api/events/:eventId` | Seat map, your holds, your tickets, waitlist position |
+| `GET` | `/api/cities` | Cities and their cinema counts |
+| `GET` | `/api/cities/:city/movies` | Films showing in a city over the next 3 days |
+| `GET` | `/api/cities/:city/movies/:movieId/shows?date=` | Showtimes by theatre for a day, with live availability |
+| `GET` | `/api/events/:eventId` | A show's seat map, movie and theatre, your holds, tickets, waitlist position |
 | `POST` | `/api/events/:eventId/holds` | Hold a seat `{ seatKey }` |
 | `DELETE` | `/api/holds/:bookingId` | Release your hold |
 | `POST` | `/api/holds/:bookingId/checkout` | Start payment `{ email }`, returns a checkout URL |
@@ -179,12 +196,14 @@ server/
   src/
     app.js              routes, auth, validation, error handling
     services/bookings.js  holds, release, payments, waitlist, expiry
+    services/catalog.js cities, theatres, films, rolling showtimes, lazy seats
+    catalog-data.js     the films (from TMDB) and cinemas
     services/locks.js   Redis seat locks (SET NX EX + Lua release)
     services/payments.js  Stripe Checkout or mock checkout
     realtime.js         Socket.IO rooms and Redis adapter
     migrations/         SQL schema with the uniqueness guarantees
-  test/                 35 tests on real PostgreSQL and Redis
-client/src/             React app (seat map, holds, waitlist, checkout)
+  test/                 45 tests on real PostgreSQL and Redis
+client/src/             React app (city, movies, showtimes, seat map, checkout)
 loadtest/rush.js        k6 rush with an integrity audit
 docker/entrypoint.sh    all-in-one mode for free hosting
 ```

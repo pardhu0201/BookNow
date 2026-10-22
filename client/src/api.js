@@ -73,6 +73,36 @@ export async function api(path, { method = 'GET', body, retried = false } = {}) 
 
 export const savedEmail = () => storage.get(EMAIL_KEY) || '';
 export const saveEmail = (email) => storage.set(EMAIL_KEY, email);
+export const savedCity = () => storage.get('booknow.city') || '';
+export const saveCity = (slug) => storage.set('booknow.city', slug);
+
+// Public reads (catalogue) need no session.
+export async function getJson(path) {
+  const res = await fetch(path);
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new ApiError(res.status, data?.error?.code, data?.error?.message || `Request failed (${res.status}).`);
+  return data;
+}
+
+const IST = 'Asia/Kolkata';
+const timeFmt = new Intl.DateTimeFormat('en-IN', { hour: 'numeric', minute: '2-digit', timeZone: IST });
+const dayFmt = new Intl.DateTimeFormat('en-IN', { weekday: 'short', day: 'numeric', month: 'short', timeZone: IST });
+export const formatTime = (iso) => timeFmt.format(new Date(iso));
+export const formatDay = (iso) => dayFmt.format(new Date(iso));
+
+// "2026-10-22" -> "Today" / "Tomorrow" / "Sat, 24 Oct", in IST.
+export function dayLabel(ymd) {
+  const todayIst = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  const tomorrowIst = new Date(Date.now() + 29.5 * 3600 * 1000).toISOString().slice(0, 10);
+  if (ymd === todayIst) return 'Today';
+  if (ymd === tomorrowIst) return 'Tomorrow';
+  return dayFmt.format(new Date(`${ymd}T12:00:00+05:30`));
+}
+
+export function runtimeLabel(minutes) {
+  if (!minutes) return null;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
 
 const formatters = new Map();
 export function formatPrice(minor, currency = 'INR') {

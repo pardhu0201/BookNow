@@ -73,7 +73,8 @@ describe('hold expiry and waitlist', () => {
     assert.equal(view.yourHolds.length, 1);
     assert.equal(view.yourHolds[0].seatKey, ids[0].seatKey);
     assert.equal(view.yourHolds[0].source, 'waitlist');
-    const secondsLeft = (Date.parse(view.yourHolds[0].expiresAt) - Date.now()) / 1000;
+    // Measured against the database clock, which sets expires_at.
+    const secondsLeft = (Date.parse(view.yourHolds[0].expiresAt) - Date.parse(view.serverTime)) / 1000;
     assert.ok(secondsLeft > ctx.config.waitlistHoldSeconds - 10 && secondsLeft <= ctx.config.waitlistHoldSeconds);
     // The freed seat was never announced as available to everyone else.
     assert.ok(!ctx.events.some((e) => e.name === 'seat' && e.status === 'available'));
