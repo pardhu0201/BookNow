@@ -13,25 +13,23 @@ function createPayments(cfg, appUrl) {
     const stripe = new Stripe(cfg.stripeSecretKey);
     return {
       provider: 'stripe',
-      async createCheckout({ booking, email }) {
+      async createCheckout({ bookings, email, eventId, eventName }) {
+        const back = (outcome) => `${appUrl}/shows/${eventId}?payment=${outcome}&order={CHECKOUT_SESSION_ID}`;
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
           customer_email: email,
-          client_reference_id: booking.id,
-          metadata: { bookingId: booking.id },
-          line_items: [
-            {
-              quantity: 1,
-              price_data: {
-                currency: cfg.currency,
-                unit_amount: booking.amount_minor,
-                product_data: { name: `${booking.event_name}, seat ${booking.seat_key}` },
-              },
+          metadata: { bookingIds: bookings.map((b) => b.id).join(','), eventId },
+          line_items: bookings.map((b) => ({
+            quantity: 1,
+            price_data: {
+              currency: cfg.currency,
+              unit_amount: b.amount_minor,
+              product_data: { name: `${eventName}, seat ${b.seat_key} (${b.tier})` },
             },
-          ],
+          })),
           expires_at: Math.floor(Date.now() / 1000) + STRIPE_MIN_SESSION_SECONDS,
-          success_url: `${appUrl}/shows/${booking.event_id}?payment=success&booking=${booking.id}`,
-          cancel_url: `${appUrl}/shows/${booking.event_id}?payment=cancelled&booking=${booking.id}`,
+          success_url: back('success'),
+          cancel_url: back('cancelled'),
         });
         return { ref: session.id, url: session.url };
       },
@@ -39,16 +37,18 @@ function createPayments(cfg, appUrl) {
         if (!cfg.stripeWebhookSecret) throw new Error('STRIPE_WEBHOOK_SECRET is not set');
         return stripe.webhooks.constructEvent(rawBody, signature, cfg.stripeWebhookSecret);
       },
-      async refund(paymentIntentId) {
-        if (paymentIntentId) await stripe.refunds.create({ payment_intent: paymentIntentId });
+      // Partial refund: one seat of a multi-seat order.
+      async refund(paymentIntentId, amountMinor) {
+        if (paymentIntentId) await stripe.refunds.create({ payment_intent: paymentIntentId, amount: amountMinor });
       },
     };
   }
 
   return {
     provider: 'mock',
-    async createCheckout({ booking }) {
-      return { ref: `mock_${crypto.randomUUID()}`, url: `${appUrl}/checkout/mock/${booking.id}` };
+    async createCheckout() {
+      const ref = crypto.randomUUID();
+      return { ref, url: `${appUrl}/checkout/${ref}` };
     },
     parseWebhook() {
       throw new AppError(404, 'not_found', 'Stripe is not configured on this server.');

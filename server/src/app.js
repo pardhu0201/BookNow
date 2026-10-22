@@ -40,10 +40,13 @@ function createApp({ config, services, auth, pool, redis }) {
     }
     const types = ['checkout.session.completed', 'checkout.session.async_payment_succeeded'];
     const session = event.data.object;
-    if (types.includes(event.type) && session.payment_status === 'paid' && session.metadata?.bookingId) {
+    const ids = String(session?.metadata?.bookingIds ?? session?.metadata?.bookingId ?? '')
+      .split(',')
+      .filter(Boolean);
+    if (types.includes(event.type) && session.payment_status === 'paid' && ids.length) {
       try {
-        await bookings.confirmPayment({
-          bookingId: v.uuid(session.metadata.bookingId, 'bookingId'),
+        await bookings.confirmOrder({
+          bookingIds: ids.map((id) => v.uuid(id, 'bookingId')),
           paymentRef: session.id,
           paymentIntent: session.payment_intent,
         });
@@ -140,11 +143,43 @@ function createApp({ config, services, auth, pool, redis }) {
   app.post('/api/holds/:bookingId/checkout', requireSession, async (req, res) => {
     res.json(
       await bookings.startCheckout({
-        bookingId: v.uuid(req.params.bookingId, 'bookingId'),
+        bookingIds: [v.uuid(req.params.bookingId, 'bookingId')],
         sessionId: req.sessionId,
         email: v.email(req.body?.email),
       })
     );
+  });
+
+  app.post('/api/checkout', requireSession, async (req, res) => {
+    const ids = req.body?.bookingIds;
+    if (!Array.isArray(ids)) throw new AppError(400, 'invalid_input', 'bookingIds must be a list.');
+    res.json(
+      await bookings.startCheckout({
+        bookingIds: ids.map((id) => v.uuid(id, 'bookingId')),
+        sessionId: req.sessionId,
+        email: v.email(req.body?.email),
+      })
+    );
+  });
+
+  const orderId = (value) => {
+    if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{8,200}$/.test(value)) {
+      throw new AppError(400, 'invalid_input', 'orderId is not valid.');
+    }
+    return value;
+  };
+
+  app.get('/api/orders/:orderId', requireSession, async (req, res) => {
+    res.json(await bookings.getOrder({ orderId: orderId(req.params.orderId), sessionId: req.sessionId }));
+  });
+
+  app.post('/api/orders/:orderId/pay', requireSession, async (req, res) => {
+    if (payments.provider !== 'mock') throw new AppError(404, 'not_found', 'Mock payments are disabled.');
+    res.json(await bookings.payOrder({ orderId: orderId(req.params.orderId), sessionId: req.sessionId }));
+  });
+
+  app.get('/api/me/tickets', requireSession, async (req, res) => {
+    res.json(await bookings.myTickets({ sessionId: req.sessionId }));
   });
 
   app.get('/api/bookings/:bookingId', requireSession, async (req, res) => {

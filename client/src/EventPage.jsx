@@ -3,33 +3,31 @@ import { io } from 'socket.io-client';
 import { api, getToken, formatPrice, runtimeLabel } from './api.js';
 import { Link } from './router.jsx';
 import SeatMap from './components/SeatMap.jsx';
-import HoldPanel from './components/HoldPanel.jsx';
+import OrderSummary from './components/OrderSummary.jsx';
 import WaitlistCard from './components/WaitlistCard.jsx';
 import ActivityFeed from './components/ActivityFeed.jsx';
 import Toasts, { useToasts } from './components/Toasts.jsx';
-import { TopBar, Footer, Poster } from './components/Chrome.jsx';
+import { Page, Poster, Spinner, EmptyState } from './components/Chrome.jsx';
+import { ArrowLeftIcon, CloseIcon } from './components/icons.jsx';
 
-// Read once at load: Stripe and the mock checkout return here with these.
-const returnParams = new URLSearchParams(window.location.search);
+const IST = 'Asia/Kolkata';
+const whenFormat = new Intl.DateTimeFormat('en-IN', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', timeZone: IST });
+const istDate = (iso) => new Date(Date.parse(iso) + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 
-const dateFormat = new Intl.DateTimeFormat('en-IN', {
-  weekday: 'short',
-  day: 'numeric',
-  month: 'short',
-  hour: 'numeric',
-  minute: '2-digit',
-  timeZone: 'Asia/Kolkata',
-});
-
+// Stripe and the test checkout come back here with ?payment=...&order=...
+// Read from the URL when this page mounts (not once per page load), so the
+// banner never reappears on a later show.
 function usePaymentReturn() {
   const [banner, setBanner] = useState(null);
   useEffect(() => {
-    const payment = returnParams.get('payment');
-    const bookingId = returnParams.get('booking');
-    if (!payment || !bookingId) return undefined;
-    window.history.replaceState(null, '', window.location.pathname);
+    const params = new URLSearchParams(window.location.search);
+    const payment = params.get('payment');
+    const order = params.get('order');
+    if (!payment || !order) return undefined;
+    const clear = () => window.history.replaceState(null, '', window.location.pathname);
     if (payment === 'cancelled') {
-      setBanner({ kind: 'info', text: 'Payment cancelled. Your hold stays active until its timer runs out.' });
+      clear();
+      setBanner({ kind: 'info', text: 'Payment cancelled. Your seats stay held until the timer runs out.' });
       return undefined;
     }
     let stopped = false;
@@ -38,16 +36,20 @@ function usePaymentReturn() {
     const poll = async () => {
       if (stopped) return;
       try {
-        const b = await api(`/api/bookings/${bookingId}`);
-        if (b.status === 'confirmed') {
+        const o = await api(`/api/orders/${encodeURIComponent(order)}`);
+        const seats = o.seats.filter((s) => s.status === 'confirmed').map((s) => s.seatKey).join(', ');
+        if (o.status === 'confirmed' || o.status === 'partial') {
+          clear();
           setBanner({
             kind: 'success',
-            text: `You're in! Seat ${b.seatKey} is confirmed${b.email ? `, and the ticket goes to ${b.email}` : ''}.`,
+            text: `You're in! ${seats} confirmed${o.email ? `. Tickets sent to ${o.email}` : ''}.`,
+            link: true,
           });
           return;
         }
-        if (b.status === 'refund_required') {
-          setBanner({ kind: 'warn', text: `Seat ${b.seatKey} went to someone else after your hold expired. You will be refunded.` });
+        if (o.status === 'refund_required') {
+          clear();
+          setBanner({ kind: 'warn', text: 'Your seats went to someone else after your hold expired. You will be refunded.' });
           return;
         }
       } catch {
@@ -65,41 +67,42 @@ function usePaymentReturn() {
   return [banner, setBanner];
 }
 
-function Stat({ label, value, tone }) {
+function ShowBar({ event, show, counts }) {
+  const when = `${whenFormat.format(new Date(event.startsAt))} IST`;
   return (
-    <div className={`stat stat-${tone}`}>
-      <span className="stat-value">{value}</span>
-      <span className="stat-label">{label}</span>
-    </div>
-  );
-}
-
-function ShowHeader({ event, show }) {
-  const when = `${dateFormat.format(new Date(event.startsAt))} IST`;
-  if (!show) {
-    return (
-      <div>
-        <p className="eyebrow">{when}</p>
-        <h1 id="event-title">{event.name}</h1>
-        <p className="muted">{event.venue}</p>
-      </div>
-    );
-  }
-  const { movie, theatre, screen } = show;
-  return (
-    <div className="show-head">
-      <Poster movie={movie} className="show-poster" />
-      <div>
-        <p className="eyebrow">{when}</p>
-        <h1 id="event-title">{movie.title}</h1>
-        <p className="muted small">
-          {[movie.language, movie.certification, runtimeLabel(movie.runtimeMinutes)].filter(Boolean).join(' · ')}
+    <section className="show-bar card">
+      {show && <Poster movie={show.movie} className="show-bar-poster" />}
+      <div className="show-bar-text">
+        <h1 id="event-title">{show ? show.movie.title : event.name}</h1>
+        <p className="show-bar-meta">
+          {show
+            ? [show.movie.language, show.movie.certification, runtimeLabel(show.movie.runtimeMinutes)].filter(Boolean).join(' · ')
+            : event.venue}
         </p>
-        <p className="show-venue">
-          {theatre.name}, {theatre.area} · {screen}
+        <p className="show-bar-where">
+          {show && (
+            <>
+              <strong>{show.theatre.name}</strong>, {show.theatre.area} · {show.screen} ·{' '}
+            </>
+          )}
+          <span>{when}</span>
         </p>
       </div>
-    </div>
+      <dl className="show-stats">
+        <div>
+          <dt>Available</dt>
+          <dd className="tone-available">{counts.available}</dd>
+        </div>
+        <div>
+          <dt>On hold</dt>
+          <dd className="tone-held">{counts.held}</dd>
+        </div>
+        <div>
+          <dt>Sold</dt>
+          <dd>{counts.sold}</dd>
+        </div>
+      </dl>
+    </section>
   );
 }
 
@@ -130,6 +133,7 @@ export default function EventPage({ showId }) {
 
   useEffect(() => {
     load().catch((err) => setLoadError(err.message));
+    return () => clearTimeout(refreshTimer.current);
   }, [load]);
 
   useEffect(() => {
@@ -151,7 +155,7 @@ export default function EventPage({ showId }) {
       socket.on('disconnect', () => setConnected(false));
       socket.on('seat', scheduleRefresh);
       socket.on('presence', (p) => p.eventId === showId && setViewers(p.viewers));
-      socket.on('activity', (a) => setActivity((prev) => [{ ...a, key: `${a.at}-${a.type}-${a.seatKey}-${Math.random()}` }, ...prev].slice(0, 12)));
+      socket.on('activity', (a) => setActivity((prev) => [{ ...a, key: `${a.at}-${a.type}-${a.seatKey}-${Math.random()}` }, ...prev].slice(0, 8)));
       socket.on('notify', (n) => {
         push(n.message, n.kind === 'hold_expired' || n.kind === 'refund' ? 'warn' : 'success');
         scheduleRefresh();
@@ -171,7 +175,6 @@ export default function EventPage({ showId }) {
     setBusySeat(seatKey);
     try {
       await api(`/api/events/${showId}/holds`, { method: 'POST', body: { seatKey } });
-      push(`Seat ${seatKey} is held for you for ${Math.round(state.limits.holdSeconds / 60)} minutes.`, 'success');
     } catch (err) {
       push(err.message, 'error');
     } finally {
@@ -190,9 +193,9 @@ export default function EventPage({ showId }) {
   };
 
   // Navigates away to the payment page on success.
-  const checkout = async (bookingId, email) => {
+  const checkout = async (bookingIds, email) => {
     try {
-      const { url } = await api(`/api/holds/${bookingId}/checkout`, { method: 'POST', body: { email } });
+      const { url } = await api('/api/checkout', { method: 'POST', body: { bookingIds, email } });
       window.location.assign(url);
     } catch (err) {
       push(err.message, 'error');
@@ -216,130 +219,119 @@ export default function EventPage({ showId }) {
     await load().catch(() => {});
   };
 
-  const city = state?.show?.city.slug;
+  const show = state?.show;
+  const title = show ? `${show.movie.title} · ${show.theatre.name}` : state?.event.name;
+  const live = (
+    <span className={`live-pill${connected ? ' on' : ''}`} role="status">
+      <span className="dot" aria-hidden="true" />
+      {connected ? `${viewers ?? 1} viewing` : 'Reconnecting…'}
+    </span>
+  );
 
   if (loadError) {
     return (
-      <div className="app">
-        <TopBar />
-        <div className="card notice">
-          <h1>Show unavailable</h1>
-          <p>{loadError}</p>
-          <Link to="/" className="btn primary">
-            Browse movies
-          </Link>
-        </div>
-      </div>
+      <Page title="Show unavailable">
+        <EmptyState
+          title="This show isn't available"
+          action={
+            <Link to="/" className="btn btn-primary">
+              Browse movies
+            </Link>
+          }
+        >
+          {loadError}
+        </EmptyState>
+      </Page>
     );
   }
   if (!state) {
     return (
-      <div className="center-page">
-        <div className="spinner" aria-label="Loading seats" />
-        <p className="muted">Loading seats… the free server may take up to a minute to wake.</p>
-      </div>
+      <Page title="Loading seats">
+        <Spinner label="Loading seats… the free server can take up to a minute to wake." />
+      </Page>
     );
   }
 
-  const { event, show, seats, counts, yourHolds, tickets, waitlist, limits, payments } = state;
+  const { event, seats, counts, yourHolds, tickets, waitlist, limits, payments } = state;
   const serverNow = now + clockOffset;
-  const prices = [...new Map(seats.map((s) => [s.tier, s.priceMinor])).entries()];
+  const total = yourHolds.reduce((sum, h) => sum + h.amountMinor, 0);
+  const locked = !event.upcoming;
 
   return (
-    <div className="app">
-      <TopBar city={city}>
-        <div className={`live ${connected ? 'on' : ''}`} role="status">
-          <span className="dot" aria-hidden="true" />
-          {connected ? `${viewers ?? 1} viewing` : 'Reconnecting…'}
-        </div>
-      </TopBar>
-
+    <Page city={show?.city.slug} title={title} topRight={live}>
       {show && (
-        <Link to={`/${show.city.slug}/movies/${show.movie.id}`} className="back-link">
-          ← Showtimes for {show.movie.title}
+        <Link to={`/${show.city.slug}/movies/${show.movie.id}?date=${istDate(event.startsAt)}`} className="back-link">
+          <ArrowLeftIcon width={16} height={16} /> Change showtime
         </Link>
       )}
 
       {banner && (
-        <div className={`banner banner-${banner.kind}`} role="status">
-          <span>{banner.text}</span>
+        <div className={`alert alert-${banner.kind}`} role="status">
+          <span>
+            {banner.text}{' '}
+            {banner.link && (
+              <Link to="/tickets" className="text-link">
+                View tickets
+              </Link>
+            )}
+          </span>
           <button className="icon-btn" onClick={() => setBanner(null)} aria-label="Dismiss">
-            ×
+            <CloseIcon width={16} height={16} />
           </button>
         </div>
       )}
-
-      {!event.upcoming && (
-        <div className="banner banner-warn" role="status">
-          This show has started, so its seats can no longer be booked.
+      {locked && (
+        <div className="alert alert-warn" role="status">
+          This show has started, so seats can no longer be booked.
         </div>
       )}
 
-      <main className="layout">
-        <section className="card hall" aria-labelledby="event-title">
-          <div className="event-head">
-            <ShowHeader event={event} show={show} />
-            <div className="stats">
-              <Stat label="Available" value={counts.available} tone="available" />
-              <Stat label="On hold" value={counts.held} tone="held" />
-              <Stat label="Sold" value={counts.sold} tone="sold" />
-            </div>
-          </div>
+      <ShowBar event={event} show={show} counts={counts} />
 
-          <SeatMap
-            seats={seats}
-            busySeat={busySeat}
-            onPick={holdSeat}
-            currency={event.currency}
-            stageLabel={show ? 'All eyes this way · Screen' : 'Stage'}
-          />
-
-          <div className="legend">
-            <div className="legend-group">
-              <span className="key key-available" /> Available
-              <span className="key key-mine" /> Your hold
-              <span className="key key-held" /> Held by someone
-              <span className="key key-sold" /> Sold
-            </div>
-            <div className="legend-group">
-              {prices.map(([tier, price]) => (
-                <span key={tier} className={`tier-chip tier-${tier.toLowerCase()}`}>
-                  {tier} {formatPrice(price, event.currency)}
-                </span>
-              ))}
-            </div>
-          </div>
+      <div className="booking-layout">
+        <section className="card seat-card" aria-labelledby="event-title">
+          <SeatMap seats={seats} busySeat={busySeat} onPick={holdSeat} currency={event.currency} stageLabel={show ? 'Screen this way' : 'Stage'} locked={locked} />
         </section>
 
-        <aside className="sidebar">
-          <HoldPanel
+        <aside className="booking-side">
+          <OrderSummary
             holds={yourHolds}
             tickets={tickets}
             serverNow={serverNow}
             currency={event.currency}
             limits={limits}
             payments={payments}
-            onRelease={release}
+            locked={locked}
+            onRemove={release}
             onCheckout={checkout}
           />
-          {(counts.available === 0 || waitlist.joined) && (
-            <WaitlistCard
-              waitlist={waitlist}
-              minutes={Math.round(limits.waitlistHoldSeconds / 60)}
-              onJoin={joinWaitlist}
-              onLeave={leaveWaitlist}
-            />
+          {(counts.available === 0 || waitlist.joined) && !locked && (
+            <WaitlistCard waitlist={waitlist} minutes={Math.round(limits.waitlistHoldSeconds / 60)} onJoin={joinWaitlist} onLeave={leaveWaitlist} />
           )}
           <ActivityFeed items={activity} serverNow={serverNow} />
-          <div className="card tip">
-            <strong>Try it with a friend.</strong> Open this show in two windows and hold a seat in one: it locks in the
-            other instantly. Nobody can buy a seat you are holding.
-          </div>
+          <p className="hint">
+            <strong>Try it with a friend:</strong> open this show in two windows and select a seat in one. It locks in the
+            other instantly.
+          </p>
         </aside>
-      </main>
+      </div>
 
-      <Footer />
+      {yourHolds.length > 0 && (
+        <div className="paybar">
+          <div>
+            <strong>{formatPrice(total, event.currency)}</strong>
+            <span className="muted small">
+              {' '}
+              · {yourHolds.length} {yourHolds.length === 1 ? 'seat' : 'seats'}
+            </span>
+          </div>
+          <a href="#order-summary" className="btn btn-primary">
+            Continue
+          </a>
+        </div>
+      )}
+
       <Toasts toasts={toasts} onDismiss={dismiss} />
-    </div>
+    </Page>
   );
 }
