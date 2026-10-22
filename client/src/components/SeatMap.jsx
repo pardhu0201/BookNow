@@ -1,50 +1,54 @@
-import React, { useEffect, useState } from 'react';
-import io from 'socket.io-client';
-import axios from 'axios';
+import { useMemo } from 'react';
+import { formatPrice } from '../api.js';
 
-const socket = io('http://localhost:4000');
+const STATE_LABEL = { available: 'available', mine: 'held by you', held: 'held by someone else', sold: 'sold' };
 
-export default function SeatMap({ eventId, userId, userEmail }) {
-  const [seats, setSeats] = useState([]); // [{seatKey, status, expiresAt}]
-  useEffect(() => {
-    // fetch seat map
-    axios.get(`/api/events/${eventId}/seatmap`).then(r => setSeats(r.data.seats));
-    socket.on('seat_locked', data => {
-      if (data.eventId !== eventId) return;
-      setSeats(prev => prev.map(s => s.seatKey === data.seatKey ? { ...s, status: 'locked', lockOwner: data.userId, expiresIn: data.expiresIn } : s));
-    });
-    socket.on('seat_confirmed', data => {
-      if (data.eventId !== eventId) return;
-      setSeats(prev => prev.map(s => s.id === data.seatId ? { ...s, status: 'sold' } : s));
-    });
-    socket.on('seat_released', data => {
-      if (data.eventId !== eventId) return;
-      setSeats(prev => prev.map(s => s.seatKey === data.seatKey ? { ...s, status: 'available' } : s));
-    });
-    return () => socket.off();
-  }, [eventId]);
-
-  async function lockSeat(seatKey) {
-    try {
-      const res = await axios.post('/api/lock', { eventId, seatKey, userId, userEmail });
-      const bookingId = res.data.bookingId;
-      // redirect to create checkout
-      const checkout = await axios.post('/api/create-checkout', { bookingId, successUrl: window.location.href, cancelUrl: window.location.href });
-      window.location = checkout.data.url;
-    } catch (err) {
-      alert(err.response?.data?.error || 'Could not lock seat');
+export default function SeatMap({ seats, busySeat, onPick, currency }) {
+  const rows = useMemo(() => {
+    const byRow = new Map();
+    for (const seat of seats) {
+      if (!byRow.has(seat.row)) byRow.set(seat.row, []);
+      byRow.get(seat.row).push(seat);
     }
-  }
+    return [...byRow.entries()];
+  }, [seats]);
 
   return (
-    <div className="grid grid-cols-10 gap-2">
-      {seats.map(s => (
-        <button key={s.seatKey} disabled={s.status !== 'available'} onClick={() => lockSeat(s.seatKey)}
-          className={`p-3 border ${s.status==='available'?'bg-green-200': s.status==='locked'?'bg-yellow-200':'bg-gray-400'}`}>
-          {s.seatKey}
-          {s.status==='locked' && <div className="text-xs">Locked</div>}
-        </button>
-      ))}
+    <div className="seatmap">
+      <div className="stage" aria-hidden="true">
+        Stage
+      </div>
+      <div className="rows" role="group" aria-label="Seat map">
+        {rows.map(([row, list]) => (
+          <div className="row" key={row}>
+            <span className="row-label" aria-hidden="true">
+              {row}
+            </span>
+            <div className="row-seats">
+              {list.map((s) => {
+                const state = s.heldByYou ? 'mine' : s.status;
+                const label = `Seat ${s.seatKey}, ${s.tier}, ${formatPrice(s.priceMinor, currency)}, ${STATE_LABEL[state]}`;
+                return (
+                  <button
+                    key={s.seatKey}
+                    type="button"
+                    className={`seat seat-${state} tier-${s.tier.toLowerCase()}${busySeat === s.seatKey ? ' busy' : ''}`}
+                    disabled={s.status !== 'available' || busySeat !== null}
+                    onClick={() => onPick(s.seatKey)}
+                    aria-label={label}
+                    title={label}
+                  >
+                    {s.number}
+                  </button>
+                );
+              })}
+            </div>
+            <span className="row-label" aria-hidden="true">
+              {row}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
