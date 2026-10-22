@@ -1,18 +1,24 @@
 'use strict';
 
-const { DEMO_EVENT_ID } = require('../seed');
+const CATALOG_SYNC_MS = 60 * 60 * 1000;
 
 // Expires lapsed holds (freeing the seat and offering it to the waitlist).
 // Every instance may run it: the UPDATE ... RETURNING claims each row once.
-function startSweeper({ bookings, config }) {
+// Also rolls the showtime window forward every hour.
+function startSweeper({ bookings, catalog, config }) {
   let running = false;
+  let lastSync = Date.now();
 
   async function tick() {
     if (running) return;
     running = true;
     try {
       await bookings.expireHolds();
-      if (config.demoMode) await bookings.resetIfSoldOut(DEMO_EVENT_ID, config.demoResetMinutes);
+      if (config.demoMode) await bookings.resetSoldOutShows(config.demoResetMinutes);
+      if (catalog && Date.now() - lastSync > CATALOG_SYNC_MS) {
+        lastSync = Date.now();
+        await catalog.syncCatalog();
+      }
     } catch (err) {
       console.error('[sweeper]', err.message);
     } finally {

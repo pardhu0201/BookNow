@@ -30,8 +30,8 @@ function createPayments(cfg, appUrl) {
             },
           ],
           expires_at: Math.floor(Date.now() / 1000) + STRIPE_MIN_SESSION_SECONDS,
-          success_url: `${appUrl}/?payment=success&booking=${booking.id}`,
-          cancel_url: `${appUrl}/?payment=cancelled&booking=${booking.id}`,
+          success_url: `${appUrl}/shows/${booking.event_id}?payment=success&booking=${booking.id}`,
+          cancel_url: `${appUrl}/shows/${booking.event_id}?payment=cancelled&booking=${booking.id}`,
         });
         return { ref: session.id, url: session.url };
       },

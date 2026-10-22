@@ -24,8 +24,9 @@ function toHold(row) {
 
 // Lock order everywhere: seat row before booking rows. Keeping one order
 // means a hold and a late payment on the same seat cannot deadlock.
-function createBookingService({ pool, locks, payments, mailer, bus, config }) {
+function createBookingService({ pool, locks, payments, mailer, bus, config, catalog }) {
   async function holdSeat({ eventId, seatKey, sessionId, source = 'direct', ttlSeconds = config.holdSeconds }) {
+    await catalog.prepareShow(eventId);
     // Fast path: Redis SET NX turns away contention without touching Postgres.
     if (!(await locks.acquire(eventId, seatKey, sessionId, ttlSeconds))) throw seatHeld();
 
@@ -307,9 +308,13 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
   }
 
   async function getEventState({ eventId, sessionId }) {
+    await catalog.ensureSeats(eventId);
     // serverTime comes from Postgres, the clock that sets expires_at.
     const event = (
-      await pool.query('SELECT id, name, venue, starts_at, currency, now() AS db_now FROM events WHERE id = $1', [eventId])
+      await pool.query(
+        'SELECT id, name, venue, starts_at, currency, (starts_at > now()) AS upcoming, now() AS db_now FROM events WHERE id = $1',
+        [eventId]
+      )
     ).rows[0];
     if (!event) throw new AppError(404, 'event_not_found', 'Event not found.');
 
@@ -354,7 +359,15 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
     for (const s of seats) counts[s.status] += 1;
 
     return {
-      event: { id: event.id, name: event.name, venue: event.venue, startsAt: event.starts_at, currency: event.currency },
+      event: {
+        id: event.id,
+        name: event.name,
+        venue: event.venue,
+        startsAt: event.starts_at,
+        currency: event.currency,
+        upcoming: event.upcoming,
+      },
+      show: await catalog.showDetails(eventId),
       seats,
       counts,
       yourHolds,
@@ -375,6 +388,7 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
       `SELECT e.id, e.name, e.venue, e.starts_at, e.currency,
               count(s.*)::int AS total, count(s.*) FILTER (WHERE s.status = 'available')::int AS unsold
        FROM events e LEFT JOIN seats s ON s.event_id = e.id
+       WHERE e.movie_id IS NULL
        GROUP BY e.id ORDER BY e.starts_at`
     );
     return rows.map((r) => ({
@@ -391,7 +405,7 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
   async function getBooking({ bookingId, sessionId }) {
     const row = (
       await pool.query(
-        `SELECT b.id, b.session_id, b.status, b.amount_minor, b.email, b.expires_at, (b.expires_at > now()) AS active, now() AS db_now,
+        `SELECT b.id, b.event_id, b.session_id, b.status, b.amount_minor, b.email, b.expires_at, (b.expires_at > now()) AS active, now() AS db_now,
                 s.seat_key, s.tier, e.name AS event_name, e.currency
          FROM bookings b JOIN seats s ON s.id = b.seat_id JOIN events e ON e.id = b.event_id
          WHERE b.id = $1`,
@@ -401,6 +415,7 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
     if (!row || row.session_id !== sessionId) throw bookingNotFound();
     return {
       id: row.id,
+      eventId: row.event_id,
       status: row.status === 'held' && !row.active ? 'expired' : row.status,
       seatKey: row.seat_key,
       tier: row.tier,
@@ -471,6 +486,18 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
     return true;
   }
 
+  async function resetSoldOutShows(idleMinutes) {
+    const { rows } = await pool.query(
+      `SELECT e.id FROM events e
+       WHERE e.seats_ready AND e.starts_at > now()
+         AND EXISTS (SELECT 1 FROM seats s WHERE s.event_id = e.id)
+         AND NOT EXISTS (SELECT 1 FROM seats s WHERE s.event_id = e.id AND s.status = 'available')`
+    );
+    let reset = 0;
+    for (const { id } of rows) if (await resetIfSoldOut(id, idleMinutes)) reset += 1;
+    return reset;
+  }
+
   return {
     holdSeat,
     releaseHold,
@@ -486,6 +513,7 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
     attendees,
     integrity,
     resetIfSoldOut,
+    resetSoldOutShows,
   };
 }
 

@@ -37,10 +37,14 @@ async function main() {
   const bus = new EventEmitter();
   const auth = createSessionAuth(config.sessionSecret);
   const services = createServices({ config, pool, redis, bus });
+  if (config.seedOnStartup) {
+    await services.catalog.syncCatalog();
+    console.log('[boot] catalogue synced (cities, theatres, movies, next 3 days of shows)');
+  }
   const app = createApp({ config, services, auth, pool, redis });
   const server = http.createServer(app);
   const io = attachRealtime({ server, bus, auth, redis, config });
-  const sweeper = startSweeper({ bookings: services.bookings, config });
+  const sweeper = startSweeper({ bookings: services.bookings, catalog: services.catalog, config });
 
   server.listen(config.port, '0.0.0.0', () => {
     console.log(`[boot] BookNow on ${config.appUrl} (port ${config.port}, payments: ${services.payments.provider})`);
