@@ -1,9 +1,40 @@
 'use strict';
 
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
 const { toCsv } = require('../src/csv');
+
+describe('serving the client app', () => {
+  let ctx;
+  let dist;
+  before(async () => {
+    dist = fs.mkdtempSync(path.join(os.tmpdir(), 'booknow-dist-'));
+    fs.writeFileSync(path.join(dist, 'index.html'), '<!doctype html><title>BookNow</title>');
+    ctx = await setup({ clientDist: dist });
+  });
+  after(async () => {
+    await ctx.close();
+    fs.rmSync(dist, { recursive: true, force: true });
+  });
+
+  it('serves the app shell for page routes, to GET and HEAD alike', async () => {
+    for (const page of ['/', '/hyderabad', '/hyderabad/movies/jailer-2', '/shows/00000000-0000-0000-0000-000000000001']) {
+      const get = await ctx.api.get(page).expect(200);
+      assert.match(get.text, /BookNow/);
+      const head = await ctx.api.head(page).expect(200);
+      assert.match(head.headers['content-type'], /text\/html/);
+    }
+  });
+
+  it('still returns JSON 404s for unknown API routes and rejects other methods on pages', async () => {
+    await ctx.api.head('/api/nope').expect(404);
+    await ctx.api.post('/hyderabad').expect(404);
+  });
+});
 
 describe('API surface', () => {
   let ctx;
