@@ -194,7 +194,8 @@ function createApp({ config, services, auth, pool, redis }) {
   const indexHtml = path.join(config.clientDist, 'index.html');
   if (fs.existsSync(indexHtml)) {
     app.use(express.static(config.clientDist, { index: false, maxAge: '1h' }));
-    app.use((req, res, next) => (req.method === 'GET' ? res.sendFile(indexHtml) : next()));
+    // HEAD too: link previews and uptime checks probe pages with it.
+    app.use((req, res, next) => (req.method === 'GET' || req.method === 'HEAD' ? res.sendFile(indexHtml) : next()));
   }
 
   // eslint-disable-next-line no-unused-vars
