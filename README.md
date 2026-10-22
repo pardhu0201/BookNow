@@ -2,7 +2,7 @@
 
 Live event seat booking where two people can never buy the same seat. Seats are held with Redis locks, sold inside PostgreSQL transactions, and every change is pushed to every open browser over Socket.IO.
 
-**[Live demo](LIVE_URL)** · [![CI](https://github.com/pardhu0201/BookNow/actions/workflows/ci.yml/badge.svg)](https://github.com/pardhu0201/BookNow/actions/workflows/ci.yml)
+**[Live demo: booknow-a4ut.onrender.com](https://booknow-a4ut.onrender.com)** · [![CI](https://github.com/pardhu0201/BookNow/actions/workflows/ci.yml/badge.svg)](https://github.com/pardhu0201/BookNow/actions/workflows/ci.yml)
 
 ![BookNow seat map: your hold in blue, other people's holds striped amber, sold seats grey](docs/screenshot.jpg)
 
