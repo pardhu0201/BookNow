@@ -16,7 +16,7 @@ export default function WaitlistCard({ waitlist, minutes, onJoin, onLeave }) {
           When a seat frees up, it is held for the first person in line for {minutes} minutes, before anyone else can
           see it.
         </p>
-        <button className="btn ghost" onClick={onLeave}>
+        <button className="btn btn-ghost" onClick={onLeave}>
           Leave waitlist
         </button>
       </div>
@@ -48,7 +48,7 @@ export default function WaitlistCard({ waitlist, minutes, onJoin, onLeave }) {
           onChange={(e) => setEmail(e.target.value)}
         />
       </label>
-      <button className="btn primary" disabled={busy}>
+      <button className="btn btn-primary btn-block" disabled={busy}>
         {busy ? 'Joining…' : 'Join waitlist'}
       </button>
       {waitlist.length > 0 && <p className="muted small">{waitlist.length} already waiting</p>}

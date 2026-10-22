@@ -14,6 +14,7 @@ Movie ticket booking where two people can never buy the same seat. Pick a city, 
 
 - **Browse like a real ticketing app:** choose a city (Hyderabad, Bengaluru, Chennai, Mumbai, Delhi-NCR), see the films showing there, pick a date and a showtime at a real cinema (AMB Cinemas, Prasads Multiplex, PVR Sathyam, PVR ICON, Maratha Mandir and more). Each showtime shows live availability: Available, Filling fast, Almost full, Sold out.
 - **Real films:** the October 2026 releases in Indian cinemas, with posters, runtime, genres, cast and ratings from [TMDB](https://www.themoviedb.org). Films not yet released show as advance booking.
+- **Pick several seats, pay once:** select up to 4 seats; they're held together and paid in a single checkout, with one confirmation. **My tickets** lists every booking across shows.
 - **Hold a seat** for 10 minutes. Everyone else sees it lock in real time and cannot take it while you pay.
 - **Pay** through Stripe Checkout (test mode), or a built-in test checkout when no Stripe keys are configured, so the demo works with no payment account.
 - **Release** a seat, or let the hold run out: it goes **first to the waitlist** (held 5 minutes for the next person, who is notified in the app and by email), and only then back on the map.
@@ -58,7 +59,7 @@ sequenceDiagram
 
 | Check | Result |
 | --- | --- |
-| Automated tests against real PostgreSQL and Redis | 45 passing in CI |
+| Automated tests against real PostgreSQL and Redis | 54 passing in CI |
 | 20 visitors open a brand-new show at the same instant | its 96 seats are created exactly once |
 | 100 visitors hold the same seat at the same instant | exactly 1 succeeds, 99 get 409 |
 | 120 concurrent buyers simulate a rush (hold, pay, release, let holds lapse) | 0 seats sold twice; sold seats = confirmed bookings |
@@ -88,6 +89,11 @@ Cities, theatres, films and shows live in PostgreSQL (`migrations/002_catalog.sq
 | Attendee CSV export had no authentication | Every customer email was public | Admin token, plus CSV formula-injection escaping |
 | Client called `/api/events/:id/seatmap`, which did not exist; no Dockerfiles or client app | The app could not run | Full API, React client, Docker image |
 | User id came from the request body | Anyone could act as anyone else | Server-issued, HMAC-signed guest sessions |
+| Holds taken before a show could still be paid after it started | Tickets sold for a show already running | Checkout and waitlist refuse started shows |
+| Refund for one seat of a multi-seat Stripe payment refunded the whole payment | Paid seats given away for free | Partial refunds, one seat's amount |
+| Joining the waitlist for an unknown show | 500 error (foreign-key violation) | 404 |
+| Payment banner read once per page load | "You're in!" reappeared on later shows | Read on each visit, cleared when done |
+| HEAD requests to page routes | 404 for link previews and uptime checks | Served like GET |
 
 ## Architecture
 
@@ -122,7 +128,11 @@ flowchart LR
 | `GET` | `/api/events/:eventId` | A show's seat map, movie and theatre, your holds, tickets, waitlist position |
 | `POST` | `/api/events/:eventId/holds` | Hold a seat `{ seatKey }` |
 | `DELETE` | `/api/holds/:bookingId` | Release your hold |
-| `POST` | `/api/holds/:bookingId/checkout` | Start payment `{ email }`, returns a checkout URL |
+| `POST` | `/api/checkout` | Pay for several held seats at once `{ bookingIds, email }`; returns an order id and checkout URL |
+| `GET` | `/api/orders/:orderId` | Order status, seats and total (owner only) |
+| `POST` | `/api/orders/:orderId/pay` | Complete a test payment for an order (mock mode only) |
+| `GET` | `/api/me/tickets` | Your booked tickets across shows, grouped by order |
+| `POST` | `/api/holds/:bookingId/checkout` | Single-seat checkout `{ email }` |
 | `GET` | `/api/bookings/:bookingId` | Booking status (owner only) |
 | `POST` / `DELETE` | `/api/events/:eventId/waitlist` | Join (`{ email }`) or leave the waitlist |
 | `POST` | `/api/webhooks/stripe` | Stripe webhook (signature verified) |
@@ -202,8 +212,8 @@ server/
     services/payments.js  Stripe Checkout or mock checkout
     realtime.js         Socket.IO rooms and Redis adapter
     migrations/         SQL schema with the uniqueness guarantees
-  test/                 45 tests on real PostgreSQL and Redis
-client/src/             React app (city, movies, showtimes, seat map, checkout)
+  test/                 54 tests on real PostgreSQL and Redis
+client/src/             React app (city, movies, showtimes, seat map, checkout, my tickets)
 loadtest/rush.js        k6 rush with an integrity audit
 docker/entrypoint.sh    all-in-one mode for free hosting
 ```

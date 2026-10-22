@@ -9,6 +9,7 @@ const UNIQUE_VIOLATION = '23505';
 // expired if it ends within this window so the next buyer is not blocked.
 const STALE_HOLD_GRACE = "interval '2 seconds'";
 
+const seatList = (keys) => (keys.length === 1 ? `seat ${keys[0]}` : `seats ${keys.join(', ')}`);
 const seatHeld = () => new AppError(409, 'seat_held', 'Someone else is holding this seat right now.');
 const bookingNotFound = () => new AppError(404, 'booking_not_found', 'Booking not found.');
 
@@ -174,31 +175,186 @@ function createBookingService({ pool, locks, payments, mailer, bus, config, cata
     return rows.length;
   }
 
-  async function startCheckout({ bookingId, sessionId, email }) {
-    const booking = (
-      await pool.query(
-        `SELECT b.*, s.seat_key, e.name AS event_name, (b.expires_at > now()) AS active
-         FROM bookings b JOIN seats s ON s.id = b.seat_id JOIN events e ON e.id = b.event_id
-         WHERE b.id = $1`,
-        [bookingId]
-      )
-    ).rows[0];
-    if (!booking || booking.session_id !== sessionId) throw bookingNotFound();
-    if (booking.status !== 'held' || !booking.active) {
+  // One checkout (an "order") for several held seats of the same show. The
+  // order id is the payment reference shared by its bookings.
+  async function startCheckout({ bookingIds, sessionId, email }) {
+    const ids = [...new Set(bookingIds)];
+    if (ids.length === 0 || ids.length > config.maxHoldsPerSession) {
+      throw new AppError(400, 'invalid_input', `Choose between 1 and ${config.maxHoldsPerSession} held seats.`);
+    }
+    const { rows } = await pool.query(
+      `SELECT b.*, s.seat_key, s.tier, s.row_label, s.seat_number, e.name AS event_name,
+              (b.expires_at > now()) AS active, (e.starts_at > now()) AS upcoming
+       FROM bookings b JOIN seats s ON s.id = b.seat_id JOIN events e ON e.id = b.event_id
+       WHERE b.id = ANY($1::uuid[])
+       ORDER BY s.row_label, s.seat_number`,
+      [ids]
+    );
+    if (rows.length !== ids.length || rows.some((r) => r.session_id !== sessionId)) throw bookingNotFound();
+    if (new Set(rows.map((r) => r.event_id)).size > 1) {
+      throw new AppError(400, 'invalid_input', 'All seats in one checkout must be for the same show.');
+    }
+    if (rows.some((r) => r.status !== 'held' || !r.active)) {
       throw new AppError(409, 'hold_expired', 'Your hold has ended. Pick the seat again.');
     }
+    if (!rows[0].upcoming) throw new AppError(409, 'show_started', 'This show has already started.');
 
-    const checkout = await payments.createCheckout({ booking, email });
-    await pool.query(`UPDATE bookings SET email = $2, payment_ref = $3, updated_at = now() WHERE id = $1`, [
-      bookingId,
+    const checkout = await payments.createCheckout({
+      bookings: rows,
       email,
-      checkout.ref,
-    ]);
-    return { url: checkout.url, provider: payments.provider };
+      eventId: rows[0].event_id,
+      eventName: rows[0].event_name,
+    });
+    await pool.query(
+      `UPDATE bookings SET email = $2, payment_ref = $3, updated_at = now() WHERE id = ANY($1::uuid[])`,
+      [ids, email, checkout.ref]
+    );
+    return { url: checkout.url, orderId: checkout.ref, provider: payments.provider };
+  }
+
+  function orderStatus(statuses) {
+    if (statuses.every((s) => s === 'confirmed')) return 'confirmed';
+    if (statuses.includes('held')) return 'pending';
+    if (statuses.includes('confirmed')) return 'partial';
+    if (statuses.includes('refund_required')) return 'refund_required';
+    return 'expired';
+  }
+
+  async function getOrder({ orderId, sessionId }) {
+    const { rows } = await pool.query(
+      `SELECT b.id, b.event_id, b.session_id, b.status, b.amount_minor, b.email, b.expires_at,
+              (b.expires_at > now()) AS active, now() AS db_now, s.seat_key, s.tier,
+              e.name AS event_name, e.venue, e.starts_at, e.currency
+       FROM bookings b JOIN seats s ON s.id = b.seat_id JOIN events e ON e.id = b.event_id
+       WHERE b.payment_ref = $1
+       ORDER BY s.row_label, s.seat_number`,
+      [orderId]
+    );
+    if (!rows.length || rows.some((r) => r.session_id !== sessionId)) {
+      throw new AppError(404, 'order_not_found', 'Order not found.');
+    }
+    const seats = rows.map((r) => ({
+      bookingId: r.id,
+      seatKey: r.seat_key,
+      tier: r.tier,
+      amountMinor: r.amount_minor,
+      status: r.status === 'held' && !r.active ? 'expired' : r.status,
+    }));
+    const held = rows.filter((r) => r.status === 'held' && r.active);
+    return {
+      orderId,
+      eventId: rows[0].event_id,
+      status: orderStatus(seats.map((s) => s.status)),
+      seats,
+      totalMinor: seats.reduce((sum, s) => sum + s.amountMinor, 0),
+      currency: rows[0].currency,
+      email: rows[0].email,
+      eventName: rows[0].event_name,
+      venue: rows[0].venue,
+      startsAt: rows[0].starts_at,
+      show: await catalog.showDetails(rows[0].event_id),
+      expiresAt: held.length ? new Date(Math.min(...held.map((r) => r.expires_at.getTime()))).toISOString() : null,
+      serverTime: rows[0].db_now.toISOString(),
+    };
+  }
+
+  // Confirms every seat of an order, then tells the buyer once (not per seat).
+  async function confirmOrder({ bookingIds, paymentRef, paymentIntent }) {
+    const results = [];
+    for (const bookingId of bookingIds) {
+      results.push({ bookingId, ...(await confirmPayment({ bookingId, paymentRef, paymentIntent, quiet: true })) });
+    }
+    const fresh = results.filter((r) => r.changed);
+    if (fresh.length) {
+      const { rows } = await pool.query(
+        `SELECT b.session_id, b.email, e.name, s.seat_key, b.status
+         FROM bookings b JOIN seats s ON s.id = b.seat_id JOIN events e ON e.id = b.event_id
+         WHERE b.id = ANY($1::uuid[]) ORDER BY s.row_label, s.seat_number`,
+        [fresh.map((r) => r.bookingId)]
+      );
+      const sold = rows.filter((r) => r.status === 'confirmed').map((r) => r.seat_key);
+      const refunded = rows.filter((r) => r.status === 'refund_required').map((r) => r.seat_key);
+      const { session_id: sessionId, email, name } = rows[0];
+      if (sold.length) {
+        bus.emit('notify', { sessionId, kind: 'booking_confirmed', message: `Booking confirmed: ${seatList(sold)}.` });
+        void mailer.send({
+          to: email,
+          subject: `Your BookNow tickets: ${name}, ${seatList(sold)}`,
+          text: `Your booking is confirmed for ${name}: ${seatList(sold)}. Order ${paymentRef}.`,
+        });
+      }
+      if (refunded.length) {
+        bus.emit('notify', {
+          sessionId,
+          kind: 'refund',
+          message: `${seatList(refunded)} went to someone else after your hold expired. Those seats will be refunded.`,
+        });
+        void mailer.send({
+          to: email,
+          subject: `Refund for ${seatList(refunded)}`,
+          text: `Your hold expired before payment completed and ${seatList(refunded)} went to someone else. You will be refunded for those seats.`,
+        });
+      }
+    }
+    return results.map(({ bookingId, status }) => ({ bookingId, status }));
+  }
+
+  async function payOrder({ orderId, sessionId }) {
+    const order = await getOrder({ orderId, sessionId });
+    await confirmOrder({ bookingIds: order.seats.map((s) => s.bookingId), paymentRef: orderId });
+    return getOrder({ orderId, sessionId });
+  }
+
+  async function myTickets({ sessionId }) {
+    const { rows } = await pool.query(
+      `SELECT b.id, b.payment_ref, b.status, b.amount_minor, b.updated_at, s.seat_key, s.tier,
+              e.id AS event_id, e.name, e.venue, e.starts_at, e.currency, e.screen,
+              m.title, m.poster_url, m.language, m.certification, t.name AS theatre, t.area
+       FROM bookings b JOIN seats s ON s.id = b.seat_id JOIN events e ON e.id = b.event_id
+       LEFT JOIN movies m ON m.id = e.movie_id LEFT JOIN theatres t ON t.id = e.theatre_id
+       WHERE b.session_id = $1 AND b.status IN ('confirmed', 'refund_required')
+       ORDER BY e.starts_at, s.row_label, s.seat_number`,
+      [sessionId]
+    );
+    const orders = new Map();
+    for (const r of rows) {
+      const key = `${r.payment_ref ?? r.id}|${r.event_id}`;
+      if (!orders.has(key)) {
+        orders.set(key, {
+          orderId: r.payment_ref ?? r.id,
+          eventId: r.event_id,
+          title: r.title ?? r.name,
+          posterUrl: r.poster_url,
+          language: r.language,
+          certification: r.certification,
+          theatre: r.theatre ? `${r.theatre}, ${r.area}` : r.venue,
+          screen: r.screen,
+          startsAt: r.starts_at,
+          currency: r.currency,
+          seats: [],
+          totalMinor: 0,
+          refundedSeats: [],
+        });
+      }
+      const o = orders.get(key);
+      if (r.status === 'confirmed') {
+        o.seats.push({ seatKey: r.seat_key, tier: r.tier });
+        o.totalMinor += r.amount_minor;
+      } else {
+        o.refundedSeats.push(r.seat_key);
+      }
+    }
+    const list = [...orders.values()];
+    const now = Date.now();
+    return {
+      upcoming: list.filter((o) => new Date(o.startsAt).getTime() > now),
+      past: list.filter((o) => new Date(o.startsAt).getTime() <= now).reverse(),
+    };
   }
 
   // Idempotent: Stripe retries webhooks, and a retry must not sell twice.
-  async function confirmPayment({ bookingId, paymentRef, paymentIntent }) {
+  // quiet: the caller (an order) sends one combined notification instead.
+  async function confirmPayment({ bookingId, paymentRef, paymentIntent, quiet = false }) {
     const outcome = await withTransaction(pool, async (client) => {
       const pre = (await client.query('SELECT seat_id FROM bookings WHERE id = $1', [bookingId])).rows[0];
       if (!pre) throw bookingNotFound();
@@ -241,6 +397,11 @@ function createBookingService({ pool, locks, payments, mailer, bus, config, cata
       await locks.release(booking.event_id, seat.seat_key, booking.session_id);
       bus.emit('seat', { eventId: booking.event_id, seatKey: seat.seat_key, status: 'sold' });
       bus.emit('activity', { eventId: booking.event_id, type: 'sold', seatKey: seat.seat_key });
+    } else if (outcome.changed) {
+      // Refund just this seat's amount: other seats in the order may be sold.
+      await payments.refund(paymentIntent, booking.amount_minor);
+    }
+    if (outcome.changed && !quiet && outcome.status === 'confirmed') {
       bus.emit('notify', {
         sessionId: booking.session_id,
         kind: 'booking_confirmed',
@@ -251,8 +412,7 @@ function createBookingService({ pool, locks, payments, mailer, bus, config, cata
         subject: `Your BookNow ticket: seat ${seat.seat_key}`,
         text: `Your booking is confirmed. Seat ${seat.seat_key}. Booking id ${booking.id}.`,
       });
-    } else if (outcome.changed) {
-      await payments.refund(paymentIntent);
+    } else if (outcome.changed && !quiet) {
       bus.emit('notify', {
         sessionId: booking.session_id,
         kind: 'refund',
@@ -264,10 +424,13 @@ function createBookingService({ pool, locks, payments, mailer, bus, config, cata
         text: `Your hold expired before payment completed and the seat went to someone else. You will be refunded in full.`,
       });
     }
-    return { bookingId, status: outcome.status };
+    return { bookingId, status: outcome.status, changed: outcome.changed };
   }
 
   async function joinWaitlist({ eventId, sessionId, email }) {
+    const show = (await pool.query('SELECT (starts_at > now()) AS upcoming FROM events WHERE id = $1', [eventId])).rows[0];
+    if (!show) throw new AppError(404, 'event_not_found', 'Show not found.');
+    if (!show.upcoming) throw new AppError(409, 'show_started', 'This show has already started.');
     const free = await pool.query(
       `SELECT count(*)::int AS n FROM seats s
        WHERE s.event_id = $1 AND s.status = 'available'
@@ -349,7 +512,7 @@ function createBookingService({ pool, locks, payments, mailer, bus, config, cata
             `SELECT b.id, s.seat_key, s.tier, b.amount_minor, b.status, b.email
              FROM bookings b JOIN seats s ON s.id = b.seat_id
              WHERE b.event_id = $1 AND b.session_id = $2 AND b.status IN ('confirmed', 'refund_required')
-             ORDER BY b.updated_at DESC`,
+             ORDER BY s.row_label, s.seat_number`,
             [eventId, sessionId]
           )
         ).rows.map((r) => ({ id: r.id, seatKey: r.seat_key, tier: r.tier, amountMinor: r.amount_minor, status: r.status, email: r.email }))
@@ -503,6 +666,10 @@ function createBookingService({ pool, locks, payments, mailer, bus, config, cata
     releaseHold,
     expireHolds,
     startCheckout,
+    getOrder,
+    payOrder,
+    confirmOrder,
+    myTickets,
     confirmPayment,
     completeMockPayment,
     joinWaitlist,

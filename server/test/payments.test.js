@@ -27,7 +27,7 @@ describe('checkout with the built-in mock provider', () => {
     const { body } = await hold(ctx, s, 'A1').expect(201);
     await checkout(ctx, s, body.id, 'not-an-email').expect(400);
     const res = await checkout(ctx, s, body.id).expect(200);
-    assert.match(res.body.url, new RegExp(`/checkout/mock/${body.id}$`));
+    assert.match(res.body.url, new RegExp(`/checkout/${res.body.orderId}$`));
 
     const paid = await pay(ctx, s, body.id).expect(200);
     assert.equal(paid.body.status, 'confirmed');
