@@ -307,8 +307,9 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
   }
 
   async function getEventState({ eventId, sessionId }) {
+    // serverTime comes from Postgres, the clock that sets expires_at.
     const event = (
-      await pool.query('SELECT id, name, venue, starts_at, currency FROM events WHERE id = $1', [eventId])
+      await pool.query('SELECT id, name, venue, starts_at, currency, now() AS db_now FROM events WHERE id = $1', [eventId])
     ).rows[0];
     if (!event) throw new AppError(404, 'event_not_found', 'Event not found.');
 
@@ -359,9 +360,13 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
       yourHolds,
       tickets,
       waitlist: await waitlistPosition({ eventId, sessionId }),
-      limits: { holdSeconds: config.holdSeconds, maxHoldsPerSession: config.maxHoldsPerSession },
+      limits: {
+        holdSeconds: config.holdSeconds,
+        waitlistHoldSeconds: config.waitlistHoldSeconds,
+        maxHoldsPerSession: config.maxHoldsPerSession,
+      },
       payments: payments.provider,
-      serverTime: new Date().toISOString(),
+      serverTime: event.db_now.toISOString(),
     };
   }
 
@@ -386,7 +391,7 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
   async function getBooking({ bookingId, sessionId }) {
     const row = (
       await pool.query(
-        `SELECT b.id, b.session_id, b.status, b.amount_minor, b.email, b.expires_at, (b.expires_at > now()) AS active,
+        `SELECT b.id, b.session_id, b.status, b.amount_minor, b.email, b.expires_at, (b.expires_at > now()) AS active, now() AS db_now,
                 s.seat_key, s.tier, e.name AS event_name, e.currency
          FROM bookings b JOIN seats s ON s.id = b.seat_id JOIN events e ON e.id = b.event_id
          WHERE b.id = $1`,
@@ -404,7 +409,7 @@ function createBookingService({ pool, locks, payments, mailer, bus, config }) {
       email: row.email,
       eventName: row.event_name,
       expiresAt: row.expires_at,
-      serverTime: new Date().toISOString(),
+      serverTime: row.db_now.toISOString(),
     };
   }
 

@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Tests (real PostgreSQL + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: booknow
+          POSTGRES_PASSWORD: booknow
+          POSTGRES_DB: booknow_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U booknow" --health-interval 2s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            client/package-lock.json
+      - name: Server tests
+        working-directory: server
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+      - name: Client build
+        working-directory: client
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+  load:
+    name: Load test (k6, 120 users on 50 seats)
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: booknow
+          POSTGRES_PASSWORD: booknow
+          POSTGRES_DB: booknow
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U booknow" --health-interval 2s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Start the API
+        working-directory: server
+        env:
+          DATABASE_URL: postgres://booknow:booknow@localhost:5432/booknow
+          REDIS_URL: redis://localhost:6379
+          ADMIN_TOKEN: local-admin-token
+          RATE_LIMIT: "off"
+        run: |
+          npm ci --omit=dev --no-audit --no-fund
+          nohup node src/index.js > ../server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fs localhost:4000/api/health && break; sleep 1; done
+      - uses: grafana/setup-k6-action@v1
+      - name: Rush 50 seats with 120 virtual users
+        run: k6 run --summary-trend-stats "med,p(95),p(99),max" loadtest/rush.js
+      - if: failure()
+        run: cat server.log
+
+  docker:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t booknow .
+      - name: Boot in all-in-one mode (embedded PostgreSQL + Redis), as on Render
+        run: |
+          docker run -d --name booknow -p 10000:10000 -e SESSION_SECRET=ci-secret -e DEMO_MODE=true booknow
+          for i in $(seq 1 60); do curl -fs localhost:10000/api/health && break; sleep 2; done
+          curl -fs localhost:10000/api/health
+          curl -fs localhost:10000/ | grep -q "BookNow"
+          curl -fs localhost:10000/api/events | grep -q "Indie Night Live"
+      - if: failure()
+        run: docker logs booknow

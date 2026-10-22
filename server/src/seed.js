@@ -34,7 +34,8 @@ async function seed(pool) {
     const created = await client.query(
       `INSERT INTO events (id, name, venue, starts_at)
        VALUES ($1, 'Indie Night Live', 'Riverside Arts Centre, Hyderabad',
-               date_trunc('day', now() + interval '30 days') + interval '13 hours 30 minutes')
+               (date_trunc('day', (now() + interval '30 days') AT TIME ZONE 'Asia/Kolkata') + interval '19 hours')
+                 AT TIME ZONE 'Asia/Kolkata')
        ON CONFLICT (id) DO NOTHING RETURNING id`,
       [DEMO_EVENT_ID]
     );
